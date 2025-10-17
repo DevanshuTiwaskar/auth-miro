@@ -25,6 +25,6 @@ router.get('/google/callback',
 
 router.post('/forget-password', authenticate.forgetPassword)
 
-
+router.post('/reset-password', validation.resetPasswordValidationRules,authenticate.verifyForgotPassword)
 
 export default router
