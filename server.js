@@ -8,12 +8,17 @@ import connectDB from "./src/db/db.js";
 connectDB()
 connect()
 
+if (process.env.NODE_ENV === "development") {
+  console.log("🧑‍💻 Running in development mode");
+} else {
+  console.log("🚀 Running in production mode");
+}
 
 const PORT = config.PORT || 4000
 
 
 app.listen(PORT,()=>{
-    console.log(`server is connect on ${PORT}`)
+    console.log(`🔥server is connect on ${PORT}`)
 })
 
 

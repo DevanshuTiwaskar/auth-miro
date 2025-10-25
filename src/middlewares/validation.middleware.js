@@ -29,6 +29,14 @@ export const registerValidationRules = [
 
     , validate
 ]
+export const loginValidationRules = [
+    body("email")
+        .isEmail().withMessage("Please provide a valid email address"),
+    body("password")
+        .isString().withMessage("Password must be a string")
+        .isLength({ min: 6 }).withMessage("Password must be at least 6 characters long"),
+    validate
+];
 
 export const resetPasswordValidationRules = [
     body('email')

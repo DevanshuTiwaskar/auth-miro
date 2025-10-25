@@ -23,8 +23,12 @@ router.get('/google/callback',
    authenticate.googleAuthCallback
 );
 
-router.post('/forget-password', authenticate.forgetPassword)
+router.post('/forgot-password', authenticate.forgotPassword)
 
 router.post('/reset-password', validation.resetPasswordValidationRules,authenticate.verifyForgotPassword)
+
+router.post('/login',validation.loginValidationRules,authenticate.login)
+
+router.post('/logout',authenticate.logoutUser)
 
 export default router

@@ -36,6 +36,8 @@ const userSchema = new mongoose.Schema({
         type: String,
         unique: true,
     },
+    refreshToken: { type: String, default: null, select: false },
+
     password: {
         type: String,
         required: function () {
