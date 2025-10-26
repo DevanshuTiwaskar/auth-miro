@@ -18,7 +18,7 @@ const PORT = config.PORT || 4000
 
 
 app.listen(PORT,()=>{
-    console.log(`🔥server is connect on ${PORT}`)
+    console.log(`🔥Auth server is connect on ${PORT}`)
 })
 
 
