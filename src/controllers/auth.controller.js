@@ -3,24 +3,25 @@ import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import config from "../config/config.js";
 import otpModel from "../models/otp.model.js";
+import { publishMessage } from '../broker/rabbit.js'
 import axios from "axios";
-import Redis from "ioredis"; 
+import Redis from "ioredis";
 
+// =====================================================
+// REDIS CONFIGURATION
+// =====================================================
 const redis = new Redis({
   host: process.env.REDIS_HOST,
   port: process.env.REDIS_PORT,
   username: process.env.REDIS_USERNAME,
   password: process.env.REDIS_PASSWORD,
-    
 });
 
-redis.on("connect", () => {
-  console.log("✅ Connected to Redis Cloud successfully!");
-});
+redis.on("connect", () =>
+  console.log("✅ Connected to Redis Cloud successfully!")
+);
+redis.on("error", (err) => console.error("❌ Redis connection error:", err));
 
-redis.on("error", (err) => {
-  console.error("❌ Redis connection error:", err);
-});
 // =====================================================
 // REGISTER CONTROLLER
 // =====================================================
@@ -31,32 +32,45 @@ export const register = async (req, res) => {
       email,
       fullName: { firstName, lastName },
       password,
+      role = "user", // default role
     } = req.body;
 
     if (!username || !email || !firstName || !lastName || !password) {
       return res.status(400).json({ message: "All fields are required" });
     }
 
-    const isUserAlreadyExists = await userModel.findOne({
+    const existingUser = await userModel.findOne({
       $or: [{ username }, { email }],
     });
 
-    if (isUserAlreadyExists) {
+    if (existingUser) {
       return res.status(409).json({ message: "User already exists" });
     }
 
-    const hash = await bcrypt.hash(password, 10);
+    const hashedPassword = await bcrypt.hash(password, 10);
 
     const user = await userModel.create({
       username,
       email,
       fullName: { firstName, lastName },
-      password: hash,
+      password: hashedPassword,
+      role,
     });
 
-    const token = jwt.sign({ id: user._id }, config.JWT_SECRET, {
-      expiresIn: "2d",
-    });
+    const token = jwt.sign(
+      {
+        id: user._id,
+        role: user.role,
+        fullName: {
+          firstName: user.fullName.firstName,
+          lastName: user.fullName.lastName,
+        },
+      },
+      config.JWT_SECRET,
+      {
+        expiresIn: "2d",
+      }
+    );
 
     res.cookie("token", token, {
       httpOnly: true,
@@ -65,12 +79,19 @@ export const register = async (req, res) => {
       maxAge: 2 * 24 * 60 * 60 * 1000,
     });
 
+        await publishMessage("AUTHENTICATION_NOTIFICATION_USER.REGISTERED", {
+        email: user.email,
+        fullName: `${user.fullName.firstName} ${user.fullName.lastName}`,
+        username: user.username
+    })
+
     res.status(201).json({
       message: "User registered successfully",
       user: {
         id: user._id,
         username: user.username,
         email: user.email,
+        role: user.role,
         fullName: user.fullName,
       },
     });
@@ -86,47 +107,56 @@ export const login = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    // 1️⃣ Validate input
-    if (!email || !password) {
-      return res.status(400).json({ message: "Email and password are required" });
-    }
+    if (!email || !password)
+      return res
+        .status(400)
+        .json({ message: "Email and password are required" });
 
     const key = `login_attempts:${email}`;
     const attempts = await redis.get(key);
 
-    // 2️⃣ Block if too many failed attempts (5 in 15 mins)
-    if (attempts && parseInt(attempts) >= 5) {
-      return res
-        .status(429)
-        .json({ message: "Too many failed attempts. Try again after 15 minutes." });
-    }
+    if (attempts && parseInt(attempts) >= 5)
+      return res.status(429).json({
+        message: "Too many failed attempts. Try again after 15 minutes.",
+      });
 
-    // 3️⃣ Find user
     const user = await userModel.findOne({ email }).select("+password");
     if (!user) {
       await incrementLoginAttempts(email);
       return res.status(400).json({ message: "Invalid email or password" });
     }
 
-    // 4️⃣ Compare password
-    const isPasswordValid = await bcrypt.compare(password, user.password);
-    if (!isPasswordValid) {
+    if (user.googleId) {
+      return res.status(400).json({
+        message: "Please login using Google for this account.",
+      });
+    }
+
+    const isValidPassword = await bcrypt.compare(password, user.password);
+    if (!isValidPassword) {
       await incrementLoginAttempts(email);
       return res.status(400).json({ message: "Invalid email or password" });
     }
 
-    // ✅ Successful login → reset attempts
     await redis.del(key);
 
-    // 5️⃣ Generate JWT token
-    const token = jwt.sign({ id: user._id }, config.JWT_SECRET, {
-      expiresIn: "2d",
-    });
+    const token = jwt.sign(
+      {
+        id: user._id,
+        role: user.role,
+        fullName: {
+          firstName: user.fullName.firstName,
+          lastName: user.fullName.lastName,
+        },
+      },
+      config.JWT_SECRET,
+      {
+        expiresIn: "2d",
+      }
+    );
 
-    // 6️⃣ Save session in Redis (optional)
-    await redis.set(`session:${user._id}`, token, "EX", 2 * 24 * 60 * 60); // expire in 2 days
+    await redis.set(`session:${user._id}`, token, "EX", 2 * 24 * 60 * 60);
 
-    // 7️⃣ Send HTTP-only cookie
     res.cookie("token", token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
@@ -140,6 +170,7 @@ export const login = async (req, res) => {
         id: user._id,
         username: user.username,
         email: user.email,
+        role: user.role,
         fullName: user.fullName,
       },
       token,
@@ -150,75 +181,74 @@ export const login = async (req, res) => {
   }
 };
 
-// Helper — increment failed attempts in Redis
+// Helper function — increment failed login attempts
 async function incrementLoginAttempts(email) {
   const key = `login_attempts:${email}`;
   const attempts = await redis.incr(key);
-  if (attempts === 1) {
-    await redis.expire(key, 15 * 60); // expire after 15 min
-  }
+  if (attempts === 1) await redis.expire(key, 15 * 60); // expire after 15 min
 }
 
 // =====================================================
-// GOOGLE AUTH CALLBACK (unchanged)
+// GOOGLE AUTH CALLBACK
 // =====================================================
-export const googleAuthCallback = async function (req, res) {
-  const {
-    id,
-    emails: [email],
-    name: { givenName: firstName, familyName: lastName },
-  } = req.user;
+export const googleAuthCallback = async (req, res) => {
+  try {
+    const {
+      id,
+      emails: [email],
+      name: { givenName: firstName, familyName: lastName },
+    } = req.user;
 
-  const username =
-    email.value.split("@")[0] + Math.floor(Math.random() * 1000);
+    const username =
+      email.value.split("@")[0] + Math.floor(Math.random() * 1000);
 
-  const isUserAlreadyExists = await userModel.findOne({
-    $or: [{ googleId: id }, { email: email.value }],
-  });
-
-  if (isUserAlreadyExists) {
-    const token = jwt.sign({ id: isUserAlreadyExists.id }, config.JWT_SECRET, {
-      expiresIn: "2d",
+    let user = await userModel.findOne({
+      $or: [{ googleId: id }, { email: email.value }],
     });
+
+    if (!user) {
+      user = await userModel.create({
+        username,
+        email: email.value,
+        googleId: id,
+        fullName: { firstName, lastName },
+        role: "user",
+      });
+    }
+
+    const token = jwt.sign(
+      { id: user._id, role: user.role },
+      config.JWT_SECRET,
+      {
+        expiresIn: "2d",
+      }
+    );
+
     res.cookie("token", token);
-
-    return res.status(200).json({
+    res.status(200).json({
       message: "Google authentication successful",
-      id: isUserAlreadyExists.id,
-      username: isUserAlreadyExists.username,
-      email: isUserAlreadyExists.email,
-      fullName: isUserAlreadyExists.fullName,
+      user: {
+        id: user._id,
+        username: user.username,
+        email: user.email,
+        role: user.role,
+        fullName: user.fullName,
+      },
     });
+  } catch (error) {
+    console.error("Google Auth Error:", error.message);
+    res.status(500).json({ message: "Something went wrong with Google Auth" });
   }
-
-  const user = await userModel.create({
-    username,
-    email: email.value,
-    googleId: id,
-    fullName: { firstName, lastName },
-  });
-
-  const token = jwt.sign({ id: user._id }, config.JWT_SECRET, {
-    expiresIn: "2d",
-  });
-
-  res.cookie("token", token);
-  res.status(201).json({
-    id: user.id,
-    username: user.username,
-    email: user.email,
-    fullName: user.fullName,
-  });
 };
 
 // =====================================================
 // FORGOT PASSWORD
 // =====================================================
-export const forgotPassword = async function (req, res) {
+export const forgotPassword = async (req, res) => {
   const { email } = req.body;
-  const isUserExists = await userModel.findOne({ email });
+  const user = await userModel.findOne({ email });
 
-  if (!isUserExists) {
+  if (!user) {
     return res
       .status(200)
       .json({ message: "If the email is registered, a OTP will be sent." });
@@ -241,9 +271,7 @@ export const forgotPassword = async function (req, res) {
     await axios.post(
       "http://localhost:3001/api/notification/send-forget-password-otp",
       {},
-      {
-        headers: { Authorization: `Bearer ${token}` },
-      }
+      { headers: { Authorization: `Bearer ${token}` } }
     );
 
     return res
@@ -255,20 +283,18 @@ export const forgotPassword = async function (req, res) {
 };
 
 // =====================================================
-// VERIFY FORGOT PASSWORD
+// RESET PASSWORD
 // =====================================================
-export const verifyForgotPassword = async function (req, res) {
+export const verifyForgotPassword = async (req, res) => {
   const { email, otp, newPassword } = req.body;
 
   const otpDoc = await otpModel.findOne({ email });
-  if (!otpDoc) {
+  if (!otpDoc)
     return res.status(400).json({ message: "Invalid or expired OTP" });
-  }
 
   const isOtpValid = await bcrypt.compare(otp, otpDoc.otp);
-  if (!isOtpValid) {
+  if (!isOtpValid)
     return res.status(400).json({ message: "Invalid or expired OTP" });
-  }
 
   const hashedPassword = await bcrypt.hash(newPassword, 10);
   await userModel.findOneAndUpdate({ email }, { password: hashedPassword });
@@ -277,24 +303,20 @@ export const verifyForgotPassword = async function (req, res) {
   res.status(200).json({ message: "Password reset successfully" });
 };
 
-
-// ✅ Logout controller
+// =====================================================
+// LOGOUT CONTROLLER
+// =====================================================
 export const logoutUser = async (req, res) => {
   try {
-    // Get token from cookie or Authorization header
-    const token = req.cookies?.token || req.headers.authorization?.split(" ")[1];
-    
-    if (!token) {
-      return res.status(401).json({ message: "No token provided" });
-    }
+    const token =
+      req.cookies?.token || req.headers.authorization?.split(" ")[1];
 
-    // Add token to Redis blacklist with expiry same as token
+    if (!token) return res.status(401).json({ message: "No token provided" });
+
     const decoded = jwt.decode(token);
-    const expiresAt = decoded.exp - Math.floor(Date.now() / 1000); // in seconds
+    const expiresAt = decoded.exp - Math.floor(Date.now() / 1000);
 
     await redis.set(`bl_${token}`, token, "EX", expiresAt);
-
-    // Clear cookie
     res.clearCookie("token");
 
     res.status(200).json({ message: "Logged out successfully" });
