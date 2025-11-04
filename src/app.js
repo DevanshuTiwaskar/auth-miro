@@ -6,6 +6,7 @@ import config from "./config/config.js";
 import authRouter from "./routers/auth.routes.js"
 import helmet from "helmet"
 import morgan from "morgan";
+import cors from "cors"
 
 
 const app = express()
@@ -29,7 +30,10 @@ app.use(
   })
 );
 
-
+app.use(cors({
+  origin: "http://localhost:5173",  // your React app URL
+  credentials: true,                // if using cookies or auth headers
+}));
 // Configure Passport to use Google OAuth 2.0 strategy
 passport.use(new GoogleStrategy({
     clientID: config.GOOGLE_CLIENT_ID,
