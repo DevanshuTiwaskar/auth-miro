@@ -187,7 +187,6 @@ async function incrementLoginAttempts(email) {
   const attempts = await redis.incr(key);
   if (attempts === 1) await redis.expire(key, 15 * 60); // expire after 15 min
 }
-
 // =====================================================
 // GOOGLE AUTH CALLBACK
 // =====================================================
@@ -217,30 +216,39 @@ export const googleAuthCallback = async (req, res) => {
     }
 
     const token = jwt.sign(
-      { id: user._id, role: user.role },
+      {
+        id: user._id,
+        role: user.role,
+        fullName: {
+          firstName: user.fullName.firstName,
+          lastName: user.fullName.lastName,
+        },
+      },
       config.JWT_SECRET,
       {
         expiresIn: "2d",
       }
     );
 
-    res.cookie("token", token);
-    res.status(200).json({
-      message: "Google authentication successful",
-      user: {
-        id: user._id,
-        username: user.username,
-        email: user.email,
-        role: user.role,
-        fullName: user.fullName,
-      },
+    // ⭐ --- THIS IS THE FIX --- ⭐
+    
+    // 1. Set the SECURE cookie
+    res.cookie("token", token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "Strict",
+      maxAge: 2 * 24 * 60 * 60 * 1000,
     });
+
+    // 2. Redirect to your FRONTEND callback route
+    res.redirect("http://localhost:5173/google-callback");
+
   } catch (error) {
     console.error("Google Auth Error:", error.message);
-    res.status(500).json({ message: "Something went wrong with Google Auth" });
+    // If it fails, redirect to the login page with an error
+    res.redirect("http://localhost:5173/login?error=google-auth-failed");
   }
 };
-
 // =====================================================
 // FORGOT PASSWORD
 // =====================================================
@@ -325,3 +333,26 @@ export const logoutUser = async (req, res) => {
     res.status(500).json({ message: "Something went wrong during logout" });
   }
 };
+
+
+
+export const getMe = async (req, res) => {
+  try {
+    // req.user.id is added by your authMiddleware
+    const user = await userModel.findById(req.user.id).select("-password");
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+    res.status(200).json({ user });
+  } catch (err) {
+    res.status(500).json({ message: "Server Error", error: err.message });
+  }
+};
+
+function validate(req, res, next) {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+        return res.status(400).json({ errors: errors.array() });
+    }
+    next();
+}
