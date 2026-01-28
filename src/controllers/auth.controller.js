@@ -18,7 +18,8 @@ const redis = new Redis({
 });
 
 redis.on("connect", () =>
-  console.log("✅ Connected to Redis Cloud successfully!")
+  console.log(`✅ Connected to Redis (${process.env.REDIS_HOST}:${process.env.REDIS_PORT})`)
+
 );
 redis.on("error", (err) => console.error("❌ Redis connection error:", err));
 
