@@ -1,5 +1,5 @@
 import app from "./src/app.js";
-import { connect as connectRabbit } from "./src/broker/rabbit.js";
+import { connectRabbit, consumeEvents } from "./src/broker/rabbit.js";
 import config from "./src/config/config.js";
 import connectDB from "./src/db/db.js";
 
@@ -9,7 +9,8 @@ const startServer = async () => {
     await connectDB();
 
     // Connect RabbitMQ
-    await connectRabbit();
+    await connectRabbit("auth.queue");
+;
     console.log("🐰 Connected to RabbitMQ");
 
     // Environment log
@@ -24,6 +25,11 @@ const startServer = async () => {
     app.listen(PORT, () => {
       console.log(`🔥 Auth server running on port ${PORT}`);
     });
+
+    consumeEvents((data, routingKey) => {
+  console.log(`📥 Received event: ${routingKey}`, data);
+});
+
 
   } catch (error) {
     console.error("❌ Failed to start Auth service:", error);

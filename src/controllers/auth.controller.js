@@ -3,7 +3,7 @@ import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import config from "../config/config.js";
 import otpModel from "../models/otp.model.js";
-import { publishMessage } from '../broker/rabbit.js'
+import { publishEvent } from '../broker/rabbit.js'
 import axios from "axios";
 import Redis from "ioredis";
 
@@ -13,15 +13,21 @@ import Redis from "ioredis";
 const redis = new Redis({
   host: process.env.REDIS_HOST,
   port: process.env.REDIS_PORT,
-  username: process.env.REDIS_USERNAME,
-  password: process.env.REDIS_PASSWORD,
+  maxRetriesPerRequest: 1,
+  enableOfflineQueue: false,
 });
 
-redis.on("connect", () =>
-  console.log(`✅ Connected to Redis (${process.env.REDIS_HOST}:${process.env.REDIS_PORT})`)
+let redisReady = false;
 
-);
-redis.on("error", (err) => console.error("❌ Redis connection error:", err));
+redis.on("connect", () => {
+  redisReady = true;
+  console.log("✅ Redis connected");
+});
+
+redis.on("error", () => {
+  redisReady = false;
+  console.log("⚠️ Redis not available, continuing without it");
+});
 
 // =====================================================
 // REGISTER CONTROLLER
@@ -80,11 +86,14 @@ export const register = async (req, res) => {
       maxAge: 2 * 24 * 60 * 60 * 1000,
     });
 
-        await publishMessage("AUTHENTICATION_NOTIFICATION_USER.REGISTERED", {
-        email: user.email,
-        fullName: `${user.fullName.firstName} ${user.fullName.lastName}`,
-        username: user.username
-    })
+      console.log("📢 Publishing user.registered event for:", user.email);
+      await publishEvent("user.registered", {
+  userId: user._id.toString(),
+  email: user.email,
+  username: user.username,
+  fullName: `${user.fullName.firstName} ${user.fullName.lastName}`,
+});
+
 
     res.status(201).json({
       message: "User registered successfully",
@@ -108,23 +117,33 @@ export const login = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    if (!email || !password)
-      return res
-        .status(400)
-        .json({ message: "Email and password are required" });
+    if (!email || !password) {
+      return res.status(400).json({
+        message: "Email and password are required",
+      });
+    }
 
     const key = `login_attempts:${email}`;
-    const attempts = await redis.get(key);
 
-    if (attempts && parseInt(attempts) >= 5)
+    // ✅ Check attempts only if Redis is available
+    let attempts = null;
+    if (redisReady) {
+      attempts = await redis.get(key);
+    }
+
+    if (attempts && parseInt(attempts) >= 5) {
       return res.status(429).json({
         message: "Too many failed attempts. Try again after 15 minutes.",
       });
+    }
 
     const user = await userModel.findOne({ email }).select("+password");
+
     if (!user) {
       await incrementLoginAttempts(email);
-      return res.status(400).json({ message: "Invalid email or password" });
+      return res.status(400).json({
+        message: "Invalid email or password",
+      });
     }
 
     if (user.googleId) {
@@ -134,12 +153,18 @@ export const login = async (req, res) => {
     }
 
     const isValidPassword = await bcrypt.compare(password, user.password);
+
     if (!isValidPassword) {
       await incrementLoginAttempts(email);
-      return res.status(400).json({ message: "Invalid email or password" });
+      return res.status(400).json({
+        message: "Invalid email or password",
+      });
     }
 
-    await redis.del(key);
+    // ✅ Clear attempts if Redis available
+    if (redisReady) {
+      await redis.del(key);
+    }
 
     const token = jwt.sign(
       {
@@ -151,12 +176,13 @@ export const login = async (req, res) => {
         },
       },
       config.JWT_SECRET,
-      {
-        expiresIn: "2d",
-      }
+      { expiresIn: "2d" }
     );
 
-    await redis.set(`session:${user._id}`, token, "EX", 2 * 24 * 60 * 60);
+    // ✅ Store session only if Redis available
+    if (redisReady) {
+      await redis.set(`session:${user._id}`, token, "EX", 2 * 24 * 60 * 60);
+    }
 
     res.cookie("token", token, {
       httpOnly: true,
@@ -182,12 +208,19 @@ export const login = async (req, res) => {
   }
 };
 
+
 // Helper function — increment failed login attempts
 async function incrementLoginAttempts(email) {
+  if (!redisReady) return;
+
   const key = `login_attempts:${email}`;
   const attempts = await redis.incr(key);
-  if (attempts === 1) await redis.expire(key, 15 * 60); // expire after 15 min
+
+  if (attempts === 1) {
+    await redis.expire(key, 15 * 60); // 15 minutes
+  }
 }
+
 // =====================================================
 // GOOGLE AUTH CALLBACK
 // =====================================================
@@ -254,63 +287,83 @@ export const googleAuthCallback = async (req, res) => {
 // FORGOT PASSWORD
 // =====================================================
 export const forgotPassword = async (req, res) => {
-  const { email } = req.body;
-  const user = await userModel.findOne({ email });
-
-  if (!user) {
-    return res
-      .status(200)
-      .json({ message: "If the email is registered, a OTP will be sent." });
-  }
-
-  const otp = Math.floor(100000 + Math.random() * 900000).toString();
-  const otpHash = await bcrypt.hash(otp, 10);
-
-  await otpModel.create({
-    otp: otpHash,
-    email,
-    expireIn: new Date(Date.now() + 10 * 60 * 1000),
-  });
-
   try {
-    const token = jwt.sign({ email, otp }, config.JWT_SECRET, {
-      expiresIn: "10m",
-    });
+    const { email } = req.body;
 
-    await axios.post(
-      "http://localhost:3001/api/notification/send-forget-password-otp",
-      {},
-      { headers: { Authorization: `Bearer ${token}` } }
+    const user = await userModel.findOne({ email });
+
+    if (!user) {
+      console.log("🔍 Forgot password: Email not found in DB:", email);
+      return res
+        .status(200)
+        .json({ message: "If the email is registered, an OTP will be sent." });
+    }
+
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const otpHash = await bcrypt.hash(otp, 10);
+
+    await otpModel.findOneAndUpdate(
+      { email },
+      {
+        otp: otpHash,
+        email,
+        expireIn: new Date(Date.now() + 10 * 60 * 1000),
+      },
+      { upsert: true }
     );
 
+    console.log("👤 User found for forgot password:", email);
+
+    // ✅ Publish event instead of axios
+    await publishEvent("user.forgot_password", {
+      email,
+      otp,
+    });
+    console.log("📤 Sent user.forgot_password event to RabbitMQ");
+
     return res
       .status(200)
-      .json({ message: "If the email is registered, a OTP will be sent." });
+      .json({ message: "If the email is registered, an OTP will be sent." });
+
   } catch (err) {
+    console.error("Forgot Password Error:", err.message);
     return res.status(500).json({ message: "Something went wrong" });
   }
 };
+
 
 // =====================================================
 // RESET PASSWORD
 // =====================================================
 export const verifyForgotPassword = async (req, res) => {
-  const { email, otp, newPassword } = req.body;
+  try {
+    const { email, otp, newPassword } = req.body;
 
-  const otpDoc = await otpModel.findOne({ email });
-  if (!otpDoc)
-    return res.status(400).json({ message: "Invalid or expired OTP" });
+    const otpDoc = await otpModel.findOne({ email });
 
-  const isOtpValid = await bcrypt.compare(otp, otpDoc.otp);
-  if (!isOtpValid)
-    return res.status(400).json({ message: "Invalid or expired OTP" });
+    if (!otpDoc || otpDoc.expireIn < new Date()) {
+      return res.status(400).json({ message: "Invalid or expired OTP" });
+    }
 
-  const hashedPassword = await bcrypt.hash(newPassword, 10);
-  await userModel.findOneAndUpdate({ email }, { password: hashedPassword });
-  await otpModel.findOneAndDelete({ email });
+    const isOtpValid = await bcrypt.compare(otp, otpDoc.otp);
 
-  res.status(200).json({ message: "Password reset successfully" });
+    if (!isOtpValid) {
+      return res.status(400).json({ message: "Invalid or expired OTP" });
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+    await userModel.findOneAndUpdate({ email }, { password: hashedPassword });
+    await otpModel.deleteOne({ email });
+
+    res.status(200).json({ message: "Password reset successfully" });
+
+  } catch (err) {
+    console.error("Reset Password Error:", err.message);
+    res.status(500).json({ message: "Something went wrong" });
+  }
 };
+``
 
 // =====================================================
 // LOGOUT CONTROLLER
