@@ -275,12 +275,12 @@ export const googleAuthCallback = async (req, res) => {
     });
 
     // 2. Redirect to your FRONTEND callback route
-    res.redirect("http://localhost:5173/google-callback");
+    res.redirect(`${config.FRONTEND_URL}/google-callback`);
 
   } catch (error) {
     console.error("Google Auth Error:", error.message);
     // If it fails, redirect to the login page with an error
-    res.redirect("http://localhost:5173/login?error=google-auth-failed");
+    res.redirect(`${config.FRONTEND_URL}/login?error=google-auth-failed`);
   }
 };
 // =====================================================
