@@ -39,6 +39,7 @@ passport.use(new GoogleStrategy({
     clientID: config.GOOGLE_CLIENT_ID,
     clientSecret: config.GOOGLE_CLIENT_SECRET,
     callbackURL: '/api/auth/google/callback',
+    proxy: true,
 }, (accessToken, refreshToken, profile, done) => {
     // Here, you would typically find or create a user in your database
     // For this example, we'll just return the profile
