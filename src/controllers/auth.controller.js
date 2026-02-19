@@ -79,10 +79,12 @@ export const register = async (req, res) => {
       }
     );
 
+    const isProduction = process.env.NODE_ENV === "production";
+
     res.cookie("token", token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "Strict",
+      secure: isProduction,
+      sameSite: isProduction ? "Strict" : "Lax",
       maxAge: 2 * 24 * 60 * 60 * 1000,
     });
 
@@ -184,10 +186,12 @@ export const login = async (req, res) => {
       await redis.set(`session:${user._id}`, token, "EX", 2 * 24 * 60 * 60);
     }
 
+    const isProduction = process.env.NODE_ENV === "production";
+
     res.cookie("token", token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "Strict",
+      secure: isProduction,
+      sameSite: isProduction ? "Strict" : "Lax",
       maxAge: 2 * 24 * 60 * 60 * 1000,
     });
 
@@ -267,10 +271,12 @@ export const googleAuthCallback = async (req, res) => {
     // ⭐ --- THIS IS THE FIX --- ⭐
     
     // 1. Set the SECURE cookie
+    const isProduction = process.env.NODE_ENV === "production";
+    
     res.cookie("token", token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "Strict",
+      secure: isProduction,
+      sameSite: isProduction ? "Strict" : "Lax",
       maxAge: 2 * 24 * 60 * 60 * 1000,
     });
 
